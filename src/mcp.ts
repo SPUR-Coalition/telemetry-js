@@ -12,7 +12,7 @@
  * import { TelemetryClient, MCPSessionTracker } from "@openattribution/telemetry";
  *
  * const client = new TelemetryClient({ endpoint: "...", apiKey: "..." });
- * const tracker = new MCPSessionTracker(client, "my-agent");
+ * const tracker = new MCPSessionTracker(client, "my-agent", { agentId: "my-agent" });
  *
  * // In your MCP tool handler:
  * server.tool("search_products", { query: z.string(), sessionId: z.string().optional() },
@@ -32,6 +32,7 @@ import type {
   PresentationKind,
   PresentationType,
   TelemetryEvent,
+  StartSessionOptions,
 } from "./types.js";
 import type { TelemetryClient } from "./client.js";
 
@@ -56,7 +57,11 @@ export class MCPSessionTracker {
    * @param contentScope - Stable identifier for this agent's content scope
    *   (e.g. mix ID, manifest reference, or descriptive slug like "my-shopping-agent").
    */
-  constructor(client: TelemetryClient, contentScope = "mcp-agent") {
+  constructor(
+    client: TelemetryClient,
+    contentScope = "mcp-agent",
+    private readonly sessionOptions: Omit<StartSessionOptions, "contentScope" | "externalSessionId"> = {},
+  ) {
     this.client = client;
     this.contentScope = contentScope;
   }
@@ -77,11 +82,12 @@ export class MCPSessionTracker {
     }
 
     const sessionId = await this.client.startSession({
+      ...this.sessionOptions,
       contentScope: this.contentScope,
       ...(externalSessionId != null && { externalSessionId }),
     });
 
-    if (externalSessionId != null) {
+    if (externalSessionId != null && sessionId != null) {
       this.registry.set(externalSessionId, sessionId);
     }
 
@@ -133,8 +139,8 @@ export class MCPSessionTracker {
    * @param externalSessionId - Caller-supplied conversation identifier.
    * @param urls - URLs of content cited in the agent's response.
    * @param options - Optional citation metadata.
-   * @returns Map from URL to the citation event's `id` (for `citation_id`
-   *   on later presentation events), or null on silent failure.
+   * @returns Locally assigned citation ids, or null if no session was created.
+   * These are not delivery receipts; silent mode can suppress send failures.
    */
   async trackCited(
     externalSessionId: string | undefined,
@@ -186,8 +192,8 @@ export class MCPSessionTracker {
    * @param urls - URLs presented.
    * @param options - Presentation metadata; `citationIds` is the map
    *   returned by `trackCited` when the presentations carry citations.
-   * @returns Map from URL to the presentation event's `id`, or null on
-   *   silent failure.
+   * @returns Locally assigned presentation ids, or null if no session was created.
+   * These are not delivery receipts; silent mode can suppress send failures.
    */
   async trackPresented(
     externalSessionId: string | undefined,
@@ -267,6 +273,11 @@ export class MCPSessionTracker {
     } = {},
   ): Promise<void> {
     if (urls.length === 0) return;
+    for (const url of urls) {
+      if (!options.presentationIds?.[url]) {
+        throw new Error(`Missing presentation id for engagement with ${url}`);
+      }
+    }
     const sessionId = await this.getOrCreateSession(externalSessionId);
     if (sessionId == null) return;
 

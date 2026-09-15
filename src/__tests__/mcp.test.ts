@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { MCPSessionTracker } from "../mcp.js"
+import type { TelemetryClient } from "../client.js"
 
 const mockClient = {
   startSession: vi.fn().mockResolvedValue("session-uuid-123"),
@@ -8,9 +9,7 @@ const mockClient = {
   endSession: vi.fn().mockResolvedValue(undefined),
 }
 
-// Cast to satisfy the TelemetryClient type without importing it
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const tracker = () => new MCPSessionTracker(mockClient as any)
+const tracker = () => new MCPSessionTracker(mockClient as unknown as TelemetryClient)
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -129,6 +128,7 @@ describe("MCPSessionTracker.trackEngaged", () => {
     const t = tracker()
     await t.trackEngaged("user-abc", ["https://a.com"], {
       engagementType: "link_click",
+      presentationIds: { "https://a.com": "pres-1" },
     })
     const [, events] = mockClient.recordEvents.mock.calls[0]!
     expect(events[0].type).toBe("content_engaged")
@@ -137,7 +137,9 @@ describe("MCPSessionTracker.trackEngaged", () => {
 
   it("omits engagement_type when no engagementType is given", async () => {
     const t = tracker()
-    await t.trackEngaged("user-abc", ["https://a.com"])
+    await t.trackEngaged("user-abc", ["https://a.com"], {
+      presentationIds: { "https://a.com": "pres-1" },
+    })
     const [, events] = mockClient.recordEvents.mock.calls[0]!
     expect(events[0].data).toEqual({})
   })
@@ -164,5 +166,24 @@ describe("MCPSessionTracker.sessionCount", () => {
     // Same ID — no new entry
     await t.getOrCreateSession("user-1")
     expect(t.sessionCount).toBe(2)
+  })
+})
+
+
+describe("reporting failure handling", () => {
+  it("rejects an unbound engagement before making a request", async () => {
+    const t = tracker()
+    await expect(t.trackEngaged("user-abc", ["https://a.com"]))
+      .rejects.toThrow("Missing presentation id")
+    expect(mockClient.startSession).not.toHaveBeenCalled()
+    expect(mockClient.recordEvents).not.toHaveBeenCalled()
+  })
+
+  it("retries session creation after a silent failure", async () => {
+    mockClient.startSession.mockResolvedValueOnce(null)
+    const t = tracker()
+    expect(await t.getOrCreateSession("user-abc")).toBeNull()
+    expect(await t.getOrCreateSession("user-abc")).toBe("session-uuid-123")
+    expect(mockClient.startSession).toHaveBeenCalledTimes(2)
   })
 })

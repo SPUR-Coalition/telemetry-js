@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## 1.0.0 (unreleased)
 
 Content Telemetry v1.0. Under the versioning policy below, 1.0.x implements [Content Telemetry 1.0](https://github.com/SPUR-Coalition/telemetry). Wire documents now declare `schema_version: "1.0"`; a v1 consumer rejects `"0.1"` documents and vice versa (spec 5.7.4), so upgrade the SDK and your consumer together.
 
@@ -14,6 +14,14 @@ Breaking, tracking the standard's v0.1 → v1 migration (spec 12.1):
 - `MCPSessionTracker.trackCited` always emits `citation_type` and `output_id`, and returns a URL → citation-id map. New `trackPresented` returns a URL → presentation-id map; `trackEngaged` accepts `presentationIds` to bind clicks to presentations.
 
 Added:
+
+- Refresh development dependencies and their lockfile.
+- SPUR repository stewardship; existing npm package name and Apache-2.0 attribution retained.
+- Transport-independent builders for session, event and batch documents. OpenAttribution HTTP routes remain an optional adapter.
+- `termsRef` preservation and envelope context including parent session and manifest references.
+- Agent/session context on adapter batches; empty successful event responses supported; strict session start rejects a missing identifier.
+- MCP engagements reject missing presentation references; failed session creation can be retried.
+- Generated wire documents checked against a pinned standard revision using `test:wire`; examples await required reporting and distinguish local event ids from delivery receipts.
 
 - `TelemetryClient.recordStandaloneEvent` — the standalone event envelope (spec 7.1) for session-less origin/edge retrievals and `ctx_token` click-out engagements, previously only possible with a hand-rolled POST.
 - `TelemetrySession.data` — the session-scoped extension metadata container (spec 5.1.3).

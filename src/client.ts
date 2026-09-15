@@ -1,108 +1,26 @@
 /**
  * Content Telemetry — HTTP client.
  *
- * Zero dependencies — uses native fetch (Node 18+, Deno, browsers, Edge).
+ * Zero dependencies — uses native fetch (Node 20+, Deno, browsers, Edge).
  */
 
 import type {
-  ConversationTurn,
+  EventEnvelope,
   EventType,
-  Initiator,
   SessionOutcome,
   SourceRole,
   StartSessionOptions,
   TelemetryClientOptions,
   TelemetryEvent,
   TelemetrySession,
-  UserContext,
 } from "./types.js";
 
+import {
+  eventBatchToWire, standaloneEventToWire, sessionToWire,
+  initiatorToWire, userContextToWire, outcomeToWire,
+} from "./wire.js";
+
 const TRANSIENT_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
-
-/** Content Telemetry schema version emitted on wire documents (spec 7.1). */
-const SCHEMA_VERSION = "1.0";
-
-// ---------------------------------------------------------------------------
-// Wire format helpers (camelCase → snake_case for the JSON body)
-// ---------------------------------------------------------------------------
-
-function turnToWire(turn: ConversationTurn): Record<string, unknown> {
-  // An emitter MUST NOT include a field above the turn's declared
-  // privacy_level (spec 5.5): query/response text is gated to full and
-  // summary; intent, topics, response classification and platform
-  // metadata are gated above minimal. Stripping here keeps a privacy
-  // violation from ever reaching the wire. A missing level (possible
-  // from untyped JS callers) fails closed to minimal.
-  const level = turn.privacyLevel;
-  const textAllowed = level === "full" || level === "summary";
-  const aboveMinimal = textAllowed || level === "intent";
-  return {
-    // An absent or unrecognised level already strips as minimal above;
-    // the wire value must follow, since privacy_level is required and
-    // closed-enum on ConversationTurn.
-    privacy_level: aboveMinimal || level === "minimal" ? level : "minimal",
-    query_text: textAllowed ? turn.queryText : undefined,
-    response_text: textAllowed ? turn.responseText : undefined,
-    query_intent: aboveMinimal ? turn.queryIntent : undefined,
-    response_type: aboveMinimal ? turn.responseType : undefined,
-    response_mode: aboveMinimal ? turn.responseMode : undefined,
-    topics: aboveMinimal ? turn.topics : undefined,
-    ad_rendered: aboveMinimal ? turn.adRendered : undefined,
-    content_urls_retrieved: turn.contentUrlsRetrieved,
-    content_urls_cited: turn.contentUrlsCited,
-    query_tokens: turn.queryTokens,
-    response_tokens: turn.responseTokens,
-    model_id: aboveMinimal ? turn.modelId : undefined,
-  };
-}
-
-function eventToWire(event: TelemetryEvent): Record<string, unknown> {
-  return {
-    id: event.id,
-    type: event.type,
-    timestamp: event.timestamp,
-    source_role: event.sourceRole,
-    turn_id: event.turnId,
-    content_telemetry_id: event.contentTelemetryId,
-    content_url: event.contentUrl,
-    content_id: event.contentId,
-    license_ref: event.licenseRef,
-    output_id: event.outputId,
-    output_element_id: event.outputElementId,
-    citation_id: event.citationId,
-    presentation_id: event.presentationId,
-    ctx_token: event.ctxToken,
-    product_id: event.productId,
-    turn: event.turn != null ? turnToWire(event.turn) : undefined,
-    data: event.data ?? {},
-  };
-}
-
-function initiatorToWire(i: Initiator): Record<string, unknown> {
-  return {
-    agent_id: i.agentId,
-    manifest_ref: i.manifestRef,
-    operator_id: i.operatorId,
-  };
-}
-
-function userContextToWire(uc: UserContext): Record<string, unknown> {
-  return {
-    external_id: uc.externalId,
-    segments: uc.segments ?? [],
-    attributes: uc.attributes ?? {},
-  };
-}
-
-function outcomeToWire(o: SessionOutcome): Record<string, unknown> {
-  return {
-    type: o.type,
-    value_amount: o.valueAmount ?? 0,
-    currency: o.currency ?? "USD",
-    products: o.products ?? [],
-    metadata: o.metadata ?? {},
-  };
-}
 
 // ---------------------------------------------------------------------------
 // TelemetryClient
@@ -111,14 +29,15 @@ function outcomeToWire(o: SessionOutcome): Record<string, unknown> {
 /**
  * Async client for recording Content Telemetry sessions and events.
  *
- * Works in Node.js ≥ 18, Deno, browsers, and Edge runtimes (Vercel, Cloudflare).
+ * Works in Node.js ≥ 20, Deno, browsers, and Edge runtimes (Vercel, Cloudflare).
  *
  * @example
  * ```ts
  * const client = new TelemetryClient({
  *   endpoint: "https://telemetry.example.com",
  *   apiKey: "your-api-key",
- *   failSilently: true,
+ *   failSilently: false,
+ *   defaultSourceRole: "agent",
  * });
  *
  * const sessionId = await client.startSession({ contentScope: "my-mix" });
@@ -137,6 +56,7 @@ export class TelemetryClient {
   private readonly failSilently: boolean;
   private readonly timeout: number;
   private readonly maxRetries: number;
+  private readonly sessions = new Map<string, EventEnvelope>();
   private readonly defaultSourceRole: SourceRole | undefined;
 
   constructor(options: TelemetryClientOptions) {
@@ -180,7 +100,8 @@ export class TelemetryClient {
           throw new Error(`HTTP ${res.status} ${res.statusText} from ${url}`);
         }
 
-        return await res.json();
+        const text = await res.text();
+        return text.length === 0 ? {} : JSON.parse(text);
       } catch (err) {
         lastError = err;
         if (attempt < this.maxRetries && isTransientError(err)) {
@@ -206,6 +127,7 @@ export class TelemetryClient {
    * @returns Session ID string, or null on silent failure.
    */
   async startSession(options: StartSessionOptions = {}): Promise<string | null> {
+    const startedAt = new Date().toISOString();
     const result = await this.post("/sessions/start", {
       initiator_type: options.initiatorType,
       initiator:
@@ -221,7 +143,17 @@ export class TelemetryClient {
       prior_session_ids: options.priorSessionIds ?? [],
     }) as { session_id?: string } | null;
 
-    return result?.session_id ?? null;
+    const sessionId = result?.session_id;
+    if (!sessionId) {
+      if (!this.failSilently) throw new Error("Session start did not return session_id");
+      return null;
+    }
+    this.sessions.set(sessionId, {
+      sessionId, startedAt,
+      ...(options.agentId != null && { agentId: options.agentId }),
+      ...(options.manifestRef != null && { manifestRef: options.manifestRef }),
+    });
+    return sessionId;
   }
 
   /**
@@ -232,7 +164,8 @@ export class TelemetryClient {
    * v1 requires (spec 6.5, 6.6). The generated id is returned so callers
    * can wire it into later events (`citation_id`, `presentation_id`).
    *
-   * @returns The event's id, or null when no session is active.
+   * @returns The locally assigned event id, or null when no session is active.
+   * An id is not a delivery receipt: silent mode can suppress a send failure.
    */
   async recordEvent(
     sessionId: string | null,
@@ -260,6 +193,7 @@ export class TelemetryClient {
   async recordEvents(
     sessionId: string | null,
     events: TelemetryEvent[],
+    envelope: Omit<EventEnvelope, "sessionId" | "ctxToken"> = {},
   ): Promise<void> {
     if (sessionId == null || events.length === 0) return;
     const defaultRole = this.defaultSourceRole;
@@ -268,12 +202,9 @@ export class TelemetryClient {
           e.sourceRole == null ? { ...e, sourceRole: defaultRole } : e,
         )
       : events;
-    await this.post("/events", {
-      document_type: "event_batch",
-      schema_version: SCHEMA_VERSION,
-      session_id: sessionId,
-      events: stamped.map(eventToWire),
-    });
+    await this.post("/events", eventBatchToWire(stamped, {
+      ...this.sessions.get(sessionId), ...envelope, sessionId,
+    }));
   }
 
   /**
@@ -290,27 +221,14 @@ export class TelemetryClient {
    */
   async recordStandaloneEvent(
     event: TelemetryEvent,
-    envelope: {
-      sessionId?: string;
-      ctxToken?: string;
-      agentId?: string;
-      startedAt?: string;
-    } = {},
+    envelope: EventEnvelope = {},
   ): Promise<void> {
     const defaultRole = this.defaultSourceRole;
     const stamped =
       event.sourceRole == null && defaultRole != null
         ? { ...event, sourceRole: defaultRole }
         : event;
-    await this.post("/events", {
-      document_type: "event",
-      schema_version: SCHEMA_VERSION,
-      session_id: envelope.sessionId,
-      ctx_token: envelope.ctxToken,
-      agent_id: envelope.agentId,
-      started_at: envelope.startedAt,
-      event: eventToWire(stamped),
-    });
+    await this.post("/events", standaloneEventToWire(stamped, envelope));
   }
 
   /**
@@ -325,6 +243,7 @@ export class TelemetryClient {
       session_id: sessionId,
       outcome: outcomeToWire(outcome),
     });
+    this.sessions.delete(sessionId);
   }
 
   /**
@@ -336,7 +255,11 @@ export class TelemetryClient {
    * @returns Server-assigned session ID, or null on silent failure.
    */
   async uploadSession(session: TelemetrySession): Promise<string | null> {
-    const result = await this.post("/sessions/bulk", sessionToWire(session)) as
+    const result = await this.post("/sessions/bulk", sessionToWire({
+      ...session, events: session.events.map(event =>
+        event.sourceRole == null && this.defaultSourceRole != null
+          ? { ...event, sourceRole: this.defaultSourceRole } : event),
+    })) as
       | { session_id?: string }
       | null;
     return result?.session_id ?? null;
@@ -361,30 +284,4 @@ function isTransientError(err: unknown): boolean {
     );
   }
   return false;
-}
-
-function sessionToWire(session: TelemetrySession): Record<string, unknown> {
-  return {
-    document_type: session.documentType ?? "session",
-    schema_version: session.schemaVersion ?? SCHEMA_VERSION,
-    session_id: session.sessionId,
-    conformance_level: session.conformanceLevel,
-    initiator_type: session.initiatorType,
-    initiator:
-      session.initiator != null ? initiatorToWire(session.initiator) : undefined,
-    agent_id: session.agentId,
-    content_scope: session.contentScope,
-    manifest_ref: session.manifestRef,
-    prior_session_ids: session.priorSessionIds ?? [],
-    started_at: session.startedAt,
-    ended_at: session.endedAt,
-    user_context:
-      session.userContext != null
-        ? userContextToWire(session.userContext)
-        : {},
-    events: session.events.map(eventToWire),
-    outcome:
-      session.outcome != null ? outcomeToWire(session.outcome) : undefined,
-    data: session.data,
-  };
 }

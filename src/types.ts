@@ -1,7 +1,7 @@
 /**
  * Content Telemetry — TypeScript types.
  *
- * Mirrors the Python schema (schema.py) exactly. JSON wire format uses
+ * Models the Content Telemetry standard and optional adapter extensions. JSON wire format uses
  * snake_case; these TypeScript types use camelCase with explicit mapping
  * in the client layer.
  *
@@ -321,7 +321,7 @@ export interface TelemetryEvent {
   type: EventType;
   /** UTC timestamp in ISO 8601 format. */
   timestamp: string;
-  /** Who is reporting this event. SHOULD be set on content_retrieved events. */
+  /** Who is reporting this event. Required on content_retrieved events. */
   sourceRole?: SourceRole;
   /** Associates this event with a conversation turn (spec 5.2.1). */
   turnId?: string;
@@ -333,6 +333,8 @@ export interface TelemetryEvent {
   contentId?: string;
   /** Reference to the content access licence (spec 5.2.3). */
   licenseRef?: string;
+  /** Governing terms reference; preserved unchanged on the wire (spec 5.2.4). */
+  termsRef?: string;
   /**
    * Identifier of the output artifact this event concerns. Required on
    * `content_cited` and `content_presented` events (spec 6.5, 6.6).
@@ -390,12 +392,23 @@ export interface StartSessionOptions {
   initiator?: Initiator;
 }
 
+/** Context shared by a standalone event or a batch (spec 7.1). */
+export interface EventEnvelope {
+  sessionId?: string;
+  parentSessionId?: string;
+  ctxToken?: string;
+  agentId?: string;
+  startedAt?: string;
+  manifestRef?: string;
+}
+
 /** Complete telemetry session (for bulk upload). */
 export interface TelemetrySession {
   /** Document discriminator; "session" on the wire (spec 7.1). */
   documentType?: "session";
   schemaVersion?: string;
   sessionId: string;
+  parentSessionId?: string;
   /** Informational conformance level advertised by this emitter (spec 5.7). */
   conformanceLevel?: ConformanceLevel;
   initiatorType?: InitiatorType;
@@ -415,12 +428,12 @@ export interface TelemetrySession {
 
 /** Options for TelemetryClient. */
 export interface TelemetryClientOptions {
-  /** Base URL of the Content Telemetry server. */
+  /** Base URL of a service supporting the OpenAttribution HTTP adapter routes. */
   endpoint: string;
   /** API key sent as X-API-Key header. */
   apiKey?: string;
   /**
-   * If true, failed requests are logged and swallowed rather than thrown.
+   * If true, failed requests are swallowed rather than thrown (no logging).
    * Default: true.
    */
   failSilently?: boolean;

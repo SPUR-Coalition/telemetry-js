@@ -2,131 +2,147 @@
 
 TypeScript/JavaScript SDK for the [Content Telemetry](https://github.com/SPUR-Coalition/telemetry) standard — track content attribution in AI agent interactions.
 
-SDK versions track the standard: 1.0.x implements Content Telemetry 1.0.
+SDK versions track the standard: 1.0.x targets Content Telemetry 1.0.
 
 Works in Node.js >= 20, Deno, browsers, and Edge runtimes (Vercel, Cloudflare Workers). Zero runtime dependencies.
 
-## Install
+## Status and stewardship
 
-```bash
-npm install @openattribution/telemetry
-# or
-pnpm add @openattribution/telemetry
-# or
-yarn add @openattribution/telemetry
+The repository is maintained by SPUR, a technical standards organisation and
+convener. Originally developed by OpenAttribution, it remains available under
+Apache-2.0. The npm package name remains `@openattribution/telemetry` for continuity;
+a repository transfer does not change package ownership or publish a new release.
+This branch prepares 1.0.0; the published 0.1.x package targets the older standard.
+
+SPUR convenes content market interoperability pilots: publishers, intermediaries
+and agents test discovery, agreed access, use and reporting together. Participants
+operate services and make their own commercial agreements. This SDK supplies
+reporting tools; using it does not grant content access or accreditation.
+
+## Build the v1 SDK
+
+Until 1.0.0 is published, build this checkout:
+
+```sh
+npm ci
+npm run build
+npm pack
 ```
 
-## Quick start
+Install the resulting tarball in your application with `npm install /path/to/openattribution-telemetry-1.0.0.tgz`.
+
+## First reporting integration
+
+Choose the reporting destination and transport with the publisher. The standard
+specifies documents, not a mandatory hosted service or HTTP session API. Use the
+wire builders with any agreed transport:
+
+```ts
+import { standaloneEventToWire } from "@openattribution/telemetry";
+
+// Run after an actual authorised retrieval. Keep this document/id for retries.
+const report = standaloneEventToWire({
+  id: crypto.randomUUID(),
+  type: "content_retrieved",
+  timestamp: new Date().toISOString(),
+  sourceRole: "agent",
+  contentUrl: "https://publisher.example/article",
+  termsRef: "agreement:example:1", // reference agreed by the parties
+});
+
+// This example assumes the parties agreed a JSON POST transport and its auth.
+const response = await fetch(publisherReportingEndpoint, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Authorization: reportingAuth },
+  body: JSON.stringify(report),
+});
+if (!response.ok) throw new Error(`Reporting failed: ${response.status}`);
+```
+
+`eventBatchToWire(events, envelope)` and `sessionToWire(session)` build the other
+two document formats. Set `agentId`, `sessionId` and `startedAt` for Grounding and
+Citation delivery; pass actual `sourceRole`, content identifiers and event-specific
+fields. Builders serialise caller observations and filter turn fields to the
+declared privacy level. They do not validate every requirement, generate summaries,
+interpret licences, partition reports by publisher or maintain a durable queue.
+Extensions and governing terms remain the caller's responsibility; including a
+field does not establish permission to disclose it to a destination.
+
+### OpenAttribution HTTP adapter
+
+`TelemetryClient` supports the OpenAttribution `/sessions/start`, `/events`,
+`/sessions/end` and `/sessions/bulk` routes with `X-API-Key` authentication.
+Use it only with a service offering that API; these routes are not required by
+the Content Telemetry standard. The endpoint is supplied by the application.
 
 ```ts
 import { TelemetryClient } from "@openattribution/telemetry";
 
 const client = new TelemetryClient({
-  endpoint: "https://your-telemetry-server.com",
+  endpoint: "https://consumer.example",
   apiKey: process.env.TELEMETRY_API_KEY,
-  failSilently: true, // recommended — never let telemetry break your app
+  failSilently: false, // expose failures when an engagement requires reporting
+  defaultSourceRole: "agent",
 });
-
-const sessionId = await client.startSession({
-  contentScope: "my-agent",
-  externalSessionId: "conv-abc123", // link to your own session/conversation ID
-});
-
-await client.recordEvents(sessionId, [
-  {
-    id: crypto.randomUUID(),
-    type: "content_retrieved",
-    timestamp: new Date().toISOString(),
-    contentUrl: "https://wirecutter.com/reviews/best-headphones",
-  },
-  {
-    id: crypto.randomUUID(),
-    type: "content_cited",
-    timestamp: new Date().toISOString(),
-    contentUrl: "https://wirecutter.com/reviews/best-headphones",
-    data: { citation_type: "paraphrase", position: "primary" },
-  },
-]);
-
+const sessionId = await client.startSession({ agentId: "example-agent" });
+await client.recordEvents(sessionId, [{
+  id: crypto.randomUUID(),
+  type: "content_retrieved",
+  timestamp: new Date().toISOString(),
+  contentUrl: "https://publisher.example/article",
+  termsRef: "agreement:example:1",
+}]);
 await client.endSession(sessionId, { type: "browse" });
 ```
 
-## MCP agents
+The client carries identity and start time from sessions it creates into subsequent
+batches. For a session created elsewhere, provide that context as the third
+argument to `recordEvents`. The adapter retries transient failures in memory.
+`failSilently` still defaults to `true` for compatibility; set it to `false` and
+await sends for required reporting. Returned event ids are local identifiers,
+not delivery receipts. Applications must retain failed reports, retry with stable
+ids, and follow the engagement's rules for further acquisition/use. A successful
+HTTP response alone does not prove publisher access or complete reporting.
 
-MCP tool calls are stateless — each invocation is independent. `MCPSessionTracker` solves this by maintaining an in-process session registry keyed on a caller-supplied `session_id` string, so multiple tool calls in the same conversation chain into one telemetry session.
+## MCP and agent host hooks
 
-```ts
-import { TelemetryClient, MCPSessionTracker, extractResultUrls } from "@openattribution/telemetry";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-
-const client = new TelemetryClient({
-  endpoint: process.env.TELEMETRY_ENDPOINT!,
-  apiKey: process.env.TELEMETRY_API_KEY,
-  failSilently: true,
-});
-
-const tracker = new MCPSessionTracker(client, "my-shopping-agent");
-
-const server = new McpServer({ name: "my-agent", version: "1.0.0" });
-
-server.tool(
-  "search_products",
-  {
-    query: z.string().describe("What to search for"),
-    sessionId: z.string().optional().describe(
-      "Pass a stable conversation ID to link tool calls into one session"
-    ),
-  },
-  async ({ query, sessionId }) => {
-    const products = await myProductSearch(query);
-
-    // Fire telemetry in background — never blocks the tool response
-    void tracker.trackRetrieved(sessionId, extractResultUrls(products));
-
-    return { content: [{ type: "text", text: formatProducts(products) }] };
-  }
-);
-```
-
-## Next.js / Vercel AI SDK
-
-Track web search citations from AI responses:
+`MCPSessionTracker` maintains an in-process session registry keyed by your stable
+conversation id. Call it from your tool and response hooks after observing the
+relevant action. Anonymous calls create separate sessions. Distributed hosts
+must manage continuity outside this in-memory tracker.
 
 ```ts
-// app/api/chat/route.ts
-import { streamText } from "ai";
-import { TelemetryClient, MCPSessionTracker, extractCitationUrls } from "@openattribution/telemetry";
+import { TelemetryClient, MCPSessionTracker } from "@openattribution/telemetry";
 
 const client = new TelemetryClient({
-  endpoint: process.env.TELEMETRY_ENDPOINT!,
+  endpoint: "https://consumer.example", // supports the adapter API above
   apiKey: process.env.TELEMETRY_API_KEY,
-  failSilently: true,
+  failSilently: false,
 });
-const tracker = new MCPSessionTracker(client, "my-chat-agent");
+const tracker = new MCPSessionTracker(client, "example-integration", {
+  agentId: "example-agent",
+});
 
-export async function POST(req: Request) {
-  const { messages, sessionId } = await req.json();
-
-  const result = streamText({
-    model: openrouter("openai/gpt-4.1-nano:online"),
-    messages,
-    onFinish: async ({ text }) => {
-      const citedUrls = extractCitationUrls(text);
-      if (citedUrls.length > 0) {
-        void tracker.trackCited(sessionId, citedUrls, {
-          citationType: "reference",
-          position: "supporting",
-        });
-      }
-    },
-  });
-
-  return result.toDataStreamResponse();
-}
+// In a tool hook, after receiving content:
+await tracker.trackRetrieved(conversationId, retrievedUrls);
+// In a response hook, after observing actual citations:
+const citationIds = await tracker.trackCited(conversationId, citedUrls, {
+  outputId: responseId,
+  citationType: "reference",
+});
 ```
 
-## Commerce protocol bridges
+Use the lower-level document builders or `recordEvents` when events need
+per-item `termsRef`, `licenseRef`, content ids, correlation ids or extension data.
+A citation helper does not establish that content was grounded, presented or
+engaged with: record each event only where the host can observe it. Applications
+also own report retention and publisher-specific routing.
+
+## Optional commerce protocol bridges
+
+These OpenAttribution extensions require a consumer that supports them. Commerce
+events are outside the core event enum; the bridges do not implement content
+licensing, payment or settlement.
 
 ### ACP checkout integration
 
@@ -164,38 +180,32 @@ presentation map feeds `trackEngaged`.
 
 ```ts
 await tracker.trackRetrieved(sessionId, productUrls);
-const citationIds = await tracker.trackCited(sessionId, citedUrls, { citationType: "reference" });
+const outputId = "response:42"; // the actual response being reported
+const citationIds = await tracker.trackCited(sessionId, citedUrls, { citationType: "reference", outputId });
 const presentationIds = await tracker.trackPresented(sessionId, citedUrls, {
   presentationType: "link",
-  citationIds: citationIds ?? undefined,
+  outputId,
+  ...(citationIds != null && { citationIds }),
 });
 await tracker.trackEngaged(sessionId, [clickedUrl], {
   engagementType: "link_click",
-  presentationIds: presentationIds ?? undefined,
+  ...(presentationIds != null && { presentationIds }),
 });
 await tracker.trackCheckout(sessionId, { type: "completed", valueAmount: 4999, currency: "USD" });
 ```
 
-## Click tracking with redirect endpoint
+## Click tracking
 
-```ts
-import { createTrackingUrl } from "@openattribution/telemetry";
+Keep the id returned by `trackPresented` with the exact rendered occurrence and
+pass it in `presentationIds` when recording an engagement. The tracker rejects
+an engagement without this reference. A URL alone cannot identify which of
+several appearances was clicked. The URL-keyed helpers support one occurrence
+per URL in a call; use `recordEvents` with explicit ids for repeated appearances.
+A redirect must validate its destination and resolve an authenticated click
+context before reporting; `createTrackingUrl` only constructs a URL.
 
-const trackedUrl = createTrackingUrl("https://shop.example.com/product/123", {
-  endpoint: "https://myagent.com/api/track",
-  sessionId: "conv-abc123",
-});
-
-// Next.js redirect handler (app/api/track/route.ts)
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const url = searchParams.get("url");
-  const sessionId = searchParams.get("session_id") ?? undefined;
-  if (!url) return new Response("Missing url", { status: 400 });
-  void tracker.trackEngaged(sessionId, [url], { engagementType: "link_click" });
-  return Response.redirect(url, 302);
-}
-```
+For destination-side reporting using `ctx_token`, use `standaloneEventToWire`
+or `recordStandaloneEvent` with the agreed token resolution service.
 
 ## Extraction utilities
 
@@ -212,6 +222,23 @@ const cited = extractIndexedCitations("The policy was announced [1].", sources);
 // Extract URLs from search result objects
 const resultUrls = extractResultUrls(searchResults);
 ```
+
+## Verification
+
+```sh
+npm run typecheck
+npm test
+npm run build
+```
+
+The wire check script validates SDK-generated documents against Content Telemetry
+v1 schemas and application rules. Use standard revision `a2c4fda390978dd40dca059d4e5cd36cbf1e4ac6`.
+To run locally, check out that standard revision separately, install
+`jsonschema[format-nongpl]` in your Python environment, then run
+`CT_SPEC_DIR=/path/to/telemetry npm run test:wire` after building.
+CI runs the unit tests, typecheck and build on Node 20 and 22. Run the wire check
+separately when changing serialisation. These checks verify the exercised
+documents, not service conformance or accreditation.
 
 ## Specification
 

@@ -1,7 +1,7 @@
 /**
  * @openattribution/telemetry
  *
- * OpenAttribution SDK for the Content Telemetry standard (TypeScript/JavaScript).
+ * TypeScript SDK for the Content Telemetry standard (TypeScript/JavaScript).
  * Track content attribution in AI agent interactions.
  *
  * Specification: https://contenttelemetry.org
@@ -14,11 +14,12 @@
  * const client = new TelemetryClient({
  *   endpoint: "https://telemetry.example.com",
  *   apiKey: process.env.TELEMETRY_API_KEY,
- *   failSilently: true,
+ *   failSilently: false,
+ *   defaultSourceRole: "agent",
  * });
  *
  * // MCP agent usage
- * const tracker = new MCPSessionTracker(client, "my-shopping-agent");
+ * const tracker = new MCPSessionTracker(client, "my-shopping-agent", { agentId: "my-shopping-agent" });
  * await tracker.trackRetrieved(sessionId, productUrls);
  *
  * // Extract citation URLs from AI response text
@@ -26,6 +27,8 @@
  * await tracker.trackCited(sessionId, urls);
  * ```
  */
+
+export { eventToWire, sessionToWire, standaloneEventToWire, eventBatchToWire } from "./wire.js";
 
 export { TelemetryClient } from "./client.js";
 export { MCPSessionTracker } from "./mcp.js";
@@ -41,6 +44,7 @@ export { sessionToAttribution } from "./ucp.js";
 export type {
   // Types
   TelemetryClientOptions,
+  EventEnvelope,
   TelemetrySession,
   TelemetryEvent,
   SessionOutcome,

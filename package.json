@@ -1,13 +1,13 @@
 {
   "name": "@openattribution/telemetry",
   "version": "1.0.0",
-  "description": "OpenAttribution SDK for the Content Telemetry standard (TypeScript/JavaScript) — track content attribution in AI agent interactions",
+  "description": "TypeScript/JavaScript SDK for the Content Telemetry standard, maintained by SPUR",
   "license": "Apache-2.0",
   "author": "OpenAttribution Project",
-  "homepage": "https://openattribution.org",
+  "homepage": "https://github.com/SPUR-Coalition/telemetry-js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/openattribution-org/telemetry-js"
+    "url": "https://github.com/SPUR-Coalition/telemetry-js"
   },
   "keywords": [
     "openattribution",
@@ -49,11 +49,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test:wire": "python3 scripts/check-wire.py"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
     "tsup": "^8.0.0",
-    "vitest": "^2.0.0"
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.11"
   }
 }
