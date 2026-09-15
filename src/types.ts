@@ -1,7 +1,7 @@
 /**
  * Content Telemetry — TypeScript types.
  *
- * Mirrors the Python schema (schema.py) exactly. JSON wire format uses
+ * Models the Content Telemetry standard and optional adapter extensions. JSON wire format uses
  * snake_case; these TypeScript types use camelCase with explicit mapping
  * in the client layer.
  *
@@ -18,13 +18,15 @@
  * The content lifecycle and conversation types are the Content Telemetry
  * standard's core set (spec 5.3). The commerce types are an OpenAttribution
  * extension: they are not in the standard's core event enum, and only
- * consumers that support the OA commerce profile accept them.
+ * consumers that support the OA commerce profile accept them. The standard
+ * recommends namespaced names for extension types; renaming the commerce
+ * set is the commerce profile's decision and is tracked there.
  */
 export type EventType =
   // Content lifecycle (Content Telemetry core)
   | "content_retrieved"
   | "content_grounded"
-  | "content_displayed"
+  | "content_presented"
   | "content_engaged"
   | "content_cited"
   // Conversation (Content Telemetry core)
@@ -141,8 +143,39 @@ export type ResponseMode =
   | "code_generation"
   | (string & {});
 
-/** Edge platform's classification of the requesting bot. */
-export type BotCategory = "training" | "inference" | "search";
+/**
+ * Classification of the access itself, not the bot (spec 6.2, "Access
+ * purpose"). Open enum: custom string values are permitted and consumers
+ * MUST tolerate unknown values. Replaces v0.1's `bot_category`.
+ */
+export type AccessPurpose =
+  | "training"
+  | "inference"
+  | "search"
+  | "advertising"
+  | (string & {});
+
+/**
+ * What a `content_presented` event made perceivable (spec 6.6):
+ * source content itself (`content`) or a credit, link, card, or other
+ * reference to the source (`source_reference`).
+ */
+export type PresentationKind = "content" | "source_reference";
+
+/**
+ * How a `content_presented` event made content or a source reference
+ * perceivable (spec 6.6). Custom string values are permitted; consumers
+ * MUST tolerate unknown values.
+ */
+export type PresentationType =
+  | "link"
+  | "snippet"
+  | "inline_quote"
+  | "card"
+  | "detail_view"
+  | "embed"
+  | "spoken_credit"
+  | (string & {});
 
 /** Edge cache result for a retrieval event. */
 export type CacheStatus = "hit" | "miss" | "bypass" | "dynamic";
@@ -152,18 +185,46 @@ export type CacheStatus = "hit" | "miss" | "bypass" | "dynamic";
 // ---------------------------------------------------------------------------
 
 /**
- * Citation quality signals for `content_cited` events.
- * Populate in the event's `data` field. All fields are optional.
+ * Citation quality signals for `content_cited` events (spec 6.5).
+ * Populate in the event's `data` field.
  */
 export interface CitationData {
-  /** How the content was used in the response. */
-  citation_type?: CitationType;
-  /** Token count of the excerpt used. */
+  /**
+   * Required and schema-enforced in v1. Use `unclassified` rather than
+   * omitting the field when the agent cannot classify the citation.
+   */
+  citation_type: CitationType;
+  /** Token count of the excerpt used (agent-tokeniser units). */
   excerpt_tokens?: number;
+  /**
+   * Character count of the excerpt (Unicode code points). The portable
+   * primary measurement; SHOULD accompany `excerpt_tokens` (spec 6.5).
+   */
+  excerpt_chars?: number;
+  /** SHA-256 of the excerpt as produced in the response (`sha256:{hex}`). */
+  excerpt_hash?: string;
   /** Prominence of the citation in the response. */
   position?: CitationPosition;
-  /** SHA-256 hash of cited content for verification (format: `sha256:{hex}`). */
+  /** SHA-256 hash matching the corresponding grounding event (`sha256:{hex}`). */
   content_hash?: string;
+  /** Content medium: `text`, `image`, `video`, `audio`. Defaults to `text`. */
+  media_type?: string;
+  /** Whether the cited URL was verified to resolve to matching content. */
+  url_verified?: boolean;
+}
+
+/**
+ * Presentation data for `content_presented` events (spec 6.6).
+ * Populate in the event's `data` field. Both fields below are required
+ * and schema-enforced in v1.
+ */
+export interface PresentationData {
+  /** What was made perceivable: content or a source reference. */
+  presentation_kind: PresentationKind;
+  /** How it was made perceivable. */
+  presentation_type: PresentationType;
+  /** Medium made perceivable: `text`, `image`, `video`, `audio`. Defaults to `text`. */
+  media_type?: string;
 }
 
 /**
@@ -174,8 +235,8 @@ export interface CitationData {
 export interface EdgeEnrichment {
   /** Request User-Agent header. */
   user_agent?: string;
-  /** Edge platform's bot classification. */
-  bot_category?: BotCategory;
+  /** Classification of the access (spec 6.2). Replaces v0.1's `bot_category`. */
+  purpose?: AccessPurpose;
   /** Whether the bot identity was cryptographically verified. */
   verified?: boolean;
   /** Edge cache result. */
@@ -192,8 +253,6 @@ export interface EdgeEnrichment {
   asn_org?: string;
   /** ISO 3166-1 alpha-2 country code. */
   country?: string;
-  /** SHA-256 hash of client IP (format: `sha256:{hex}`). */
-  ip_hash?: string;
 }
 
 /**
@@ -203,8 +262,8 @@ export interface EdgeEnrichment {
 export interface OriginEnrichment {
   /** Request User-Agent header. */
   user_agent?: string;
-  /** SHA-256 hash of client IP. */
-  ip_hash?: string;
+  /** Classification of the access (spec 6.2). */
+  purpose?: AccessPurpose;
   /** HTTP response status code. */
   response_status?: number;
 }
@@ -262,7 +321,7 @@ export interface TelemetryEvent {
   type: EventType;
   /** UTC timestamp in ISO 8601 format. */
   timestamp: string;
-  /** Who is reporting this event. SHOULD be set on content_retrieved events. */
+  /** Who is reporting this event. Required on content_retrieved events. */
   sourceRole?: SourceRole;
   /** Associates this event with a conversation turn (spec 5.2.1). */
   turnId?: string;
@@ -274,6 +333,33 @@ export interface TelemetryEvent {
   contentId?: string;
   /** Reference to the content access licence (spec 5.2.3). */
   licenseRef?: string;
+  /** Governing terms reference; preserved unchanged on the wire (spec 5.2.4). */
+  termsRef?: string;
+  /**
+   * Identifier of the output artifact this event concerns. Required on
+   * `content_cited` and `content_presented` events (spec 6.5, 6.6).
+   */
+  outputId?: string;
+  /** Stable identity of the cited or presented output element, when one exists. */
+  outputElementId?: string;
+  /**
+   * On `content_presented` only: the `id` of the `content_cited` event this
+   * presentation carries. Omit for uncited presentations (spec 6.6).
+   */
+  citationId?: string;
+  /**
+   * On `content_engaged` only: the `id` of the exact `content_presented`
+   * event the action occurred on. Required on agent-reported engagements
+   * (spec 6.7).
+   */
+  presentationId?: string;
+  /**
+   * On destination-reported `content_engaged` events only: the click-context
+   * token carried across the redirect (spec 7.4). Mutually exclusive with
+   * `presentationId` in practice - the destination cannot know the
+   * presentation UUID.
+   */
+  ctxToken?: string;
   /** Associated product UUID, if applicable (OpenAttribution extension). */
   productId?: string;
   /** Conversation turn data for turn_started/turn_completed events. */
@@ -306,12 +392,23 @@ export interface StartSessionOptions {
   initiator?: Initiator;
 }
 
+/** Context shared by a standalone event or a batch (spec 7.1). */
+export interface EventEnvelope {
+  sessionId?: string;
+  parentSessionId?: string;
+  ctxToken?: string;
+  agentId?: string;
+  startedAt?: string;
+  manifestRef?: string;
+}
+
 /** Complete telemetry session (for bulk upload). */
 export interface TelemetrySession {
   /** Document discriminator; "session" on the wire (spec 7.1). */
   documentType?: "session";
   schemaVersion?: string;
   sessionId: string;
+  parentSessionId?: string;
   /** Informational conformance level advertised by this emitter (spec 5.7). */
   conformanceLevel?: ConformanceLevel;
   initiatorType?: InitiatorType;
@@ -325,16 +422,18 @@ export interface TelemetrySession {
   userContext?: UserContext;
   events: TelemetryEvent[];
   outcome?: SessionOutcome;
+  /** Session-scoped extension metadata (spec 5.1.3). */
+  data?: Record<string, unknown>;
 }
 
 /** Options for TelemetryClient. */
 export interface TelemetryClientOptions {
-  /** Base URL of the Content Telemetry server. */
+  /** Base URL of a service supporting the OpenAttribution HTTP adapter routes. */
   endpoint: string;
   /** API key sent as X-API-Key header. */
   apiKey?: string;
   /**
-   * If true, failed requests are logged and swallowed rather than thrown.
+   * If true, failed requests are swallowed rather than thrown (no logging).
    * Default: true.
    */
   failSilently?: boolean;
